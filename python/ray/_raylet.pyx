@@ -4004,12 +4004,14 @@ cdef class CoreWorker:
                             c_bool is_detached,
                             soft_target_node_id,
                             c_vector[unordered_map[c_string, c_string]] bundle_label_selector,
-                            dict topology_strategy):
+                            dict topology_strategy=None,
+                            bundle_groups=None):
         cdef:
             CPlacementGroupID c_placement_group_id
             CPlacementStrategy c_strategy
             CNodeID c_soft_target_node_id = CNodeID.Nil()
             unordered_map[c_string, CPlacementStrategy] c_topology_strategy
+            c_vector[c_vector[unordered_map[c_string, double]]] c_bundle_groups
 
         c_strategy = prepare_c_strategy(strategy)
 
@@ -4018,6 +4020,22 @@ cdef class CoreWorker:
 
         if soft_target_node_id is not None:
             c_soft_target_node_id = CNodeID.FromHex(soft_target_node_id)
+
+        if topology_strategy:
+            for k, v in topology_strategy.items():
+                k_bytes = k.encode("ascii") if isinstance(k, str) else k
+                if v == "PACK" or v == b"PACK":
+                    c_topology_strategy[k_bytes] = PLACEMENT_STRATEGY_PACK
+                elif v == "SPREAD" or v == b"SPREAD":
+                    c_topology_strategy[k_bytes] = PLACEMENT_STRATEGY_SPREAD
+                elif v == "STRICT_PACK" or v == b"STRICT_PACK":
+                    c_topology_strategy[k_bytes] = PLACEMENT_STRATEGY_STRICT_PACK
+                elif v == "STRICT_SPREAD" or v == b"STRICT_SPREAD":
+                    c_topology_strategy[k_bytes] = PLACEMENT_STRATEGY_STRICT_SPREAD
+
+        if bundle_groups:
+            for group in bundle_groups:
+                c_bundle_groups.push_back(group)
 
         with nogil:
             check_status(
@@ -4030,7 +4048,8 @@ cdef class CoreWorker:
                                 is_detached,
                                 c_soft_target_node_id,
                                 bundle_label_selector,
-                                c_topology_strategy),
+                                c_topology_strategy,
+                                c_bundle_groups),
                             &c_placement_group_id))
 
         return PlacementGroupID(c_placement_group_id.Binary())

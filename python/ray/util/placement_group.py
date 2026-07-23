@@ -131,7 +131,7 @@ def _get_bundle_cache(pg_id: PlacementGroupID) -> List[Dict]:
 @PublicAPI
 @client_mode_wrap
 def placement_group(
-    bundles: List[Dict[str, float]],
+    bundles: Union[List[Dict[str, float]], List[List[Dict[str, float]]]],
     strategy: Optional[str] = None,
     name: str = "",
     lifetime: Optional[str] = None,
@@ -142,8 +142,8 @@ def placement_group(
     """Asynchronously creates a PlacementGroup.
 
     Args:
-        bundles: A list of bundles which
-            represent the resources requirements.
+        bundles: A list of bundles or a nested list of bundles (for hierarchical placement groups)
+            which represent the resources requirements.
         strategy: The strategy to create the placement group.
 
          - "PACK": Packs Bundles into as few nodes as possible.
@@ -183,8 +183,15 @@ def placement_group(
     worker = ray._private.worker.global_worker
     worker.check_connected()
 
+    flattened_bundles = bundles
+    bundle_groups = []
+    if bundles and isinstance(bundles[0], list):
+        bundle_groups = bundles
+        bundles = []
+        flattened_bundles = [b for group in bundle_groups for b in group]
+
     validate_placement_group(
-        bundles=bundles,
+        bundles=flattened_bundles,
         strategy=strategy,
         lifetime=lifetime,
         _soft_target_node_id=_soft_target_node_id,
@@ -195,13 +202,15 @@ def placement_group(
     if bundle_label_selector is None:
         bundle_label_selector = []
 
-    node_level_strategy = _derive_node_level_strategy(strategy, topology_strategy)
+    inner_topology_strategy = topology_strategy
+    if isinstance(topology_strategy, list):
+        inner_topology_strategy = topology_strategy[0] if topology_strategy else {}
 
-    # Current implementation derives node level strategy from topology_strategy,
-    # while we pass a topology strategy with node level strategy stripped.
-    if topology_strategy is not None:
+    node_level_strategy = _derive_node_level_strategy(strategy, inner_topology_strategy)
+
+    if inner_topology_strategy is not None:
         stripped_topology_strategy = {
-            k: v for k, v in topology_strategy.items() if k != NODE_ID_LABEL_KEY
+            k: v for k, v in inner_topology_strategy.items() if k != NODE_ID_LABEL_KEY
         }
     else:
         stripped_topology_strategy = {}
@@ -219,11 +228,14 @@ def placement_group(
         _soft_target_node_id,
         bundle_label_selector,
         stripped_topology_strategy,
+        bundle_groups,
     )
 
     return PlacementGroup(
         placement_group_id,
-        bundle_cache=[{k: float(v) for k, v in bundle.items()} for bundle in bundles],
+        bundle_cache=[
+            {k: float(v) for k, v in bundle.items()} for bundle in flattened_bundles
+        ],
     )
 
 
@@ -356,12 +368,17 @@ def check_placement_group_index(
 
 
 def _derive_node_level_strategy(
-    strategy: Optional[str], topology_strategy: Optional[Dict[str, str]]
+    strategy: Optional[str],
+    topology_strategy: Optional[Union[Dict[str, str], List[Dict[str, str]]]],
 ) -> str:
     """Assumes valid strategy and topology strategy, and derives the node level
     strategy from the corresponding fields accordingly.
     """
     if topology_strategy is not None:
+        if isinstance(topology_strategy, list):
+            # For hierarchical PGs, node level strategy is in the inner-most layer.
+            inner = topology_strategy[-1] if topology_strategy else {}
+            return inner.get(NODE_ID_LABEL_KEY, "PACK")
         return topology_strategy.get(NODE_ID_LABEL_KEY, "PACK")
     return strategy if strategy is not None else "PACK"
 
@@ -372,7 +389,7 @@ def validate_placement_group(
     lifetime: Optional[str] = None,
     _soft_target_node_id: Optional[str] = None,
     bundle_label_selector: List[Dict[str, str]] = None,
-    topology_strategy: Optional[Dict[str, str]] = None,
+    topology_strategy: Optional[Union[Dict[str, str], List[Dict[str, str]]]] = None,
 ) -> bool:
     """Validates inputs for placement_group.
 
@@ -426,17 +443,27 @@ def validate_placement_group(
         )
 
 
-def _validate_topology_strategy(topology_strategy: Dict[str, str]) -> None:
+def _validate_topology_strategy(
+    topology_strategy: Union[Dict[str, str], List[Dict[str, str]]]
+) -> None:
     """Validates topology_strategy shape.
 
-    Currently accepts a dict containing "ray.io/node-id" and at most one other
-    topology label. The "ray.io/node-id" entry is equivalent to the `strategy=`
-    parameter and accepts any value in VALID_PLACEMENT_GROUP_STRATEGIES. The
-    other (topology) label is restricted to "STRICT_PACK" for now.
+    Currently accepts a dict (or a list of dicts for hierarchical layers) containing
+    "ray.io/node-id" and at most one other topology label. The "ray.io/node-id" entry
+    is equivalent to the `strategy=` parameter and accepts any value in
+    VALID_PLACEMENT_GROUP_STRATEGIES. The other (topology) label is restricted to
+    "STRICT_PACK" for now.
     """
+    if isinstance(topology_strategy, list):
+        if not topology_strategy:
+            raise ValueError("`topology_strategy` list cannot be empty.")
+        for layer in topology_strategy:
+            _validate_topology_strategy(layer)
+        return
+
     if not isinstance(topology_strategy, dict):
         raise ValueError(
-            "`topology_strategy` must be a dict, "
+            "`topology_strategy` must be a dict or list of dicts, "
             f"got {type(topology_strategy).__name__}."
         )
 

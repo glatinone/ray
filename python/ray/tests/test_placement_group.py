@@ -798,5 +798,60 @@ class TestPlacementGroupValidation:
             _validate_bundle_label_selector([{"INVALID key!": "value"}])
 
 
+def test_placement_group_hierarchical_bundle_groups(ray_start_cluster):
+    """Verifies that hierarchical bundle groups can be created via placement_group()."""
+    cluster = ray_start_cluster
+    cluster.add_node(num_cpus=2)
+    cluster.add_node(num_cpus=2)
+    cluster.add_node(num_cpus=2)
+    ray.init(address=cluster.address)
+
+    # 2 groups of 2 bundles each.
+    bundle_groups = [
+        [{"CPU": 1}, {"CPU": 1}],
+        [{"CPU": 1}, {"CPU": 1}],
+    ]
+
+    # Use topology_strategy to ensure distinct nodes for each bundle group,
+    # and STRICT_PACK to ensure bundles within a group share the same node.
+    topology_strategy = [
+        {"ray.io/node-id": "SPREAD"},
+        {"ray.io/node-id": "STRICT_PACK"},
+    ]
+
+    pg = ray.util.placement_group(
+        bundles=bundle_groups, topology_strategy=topology_strategy
+    )
+    ray.get(pg.ready())
+
+    # The flattened placement group should have 4 bundles.
+    assert len(pg.bundle_specs) == 4
+
+    # Check node distribution using tasks.
+    @ray.remote(num_cpus=1)
+    def get_node():
+        return ray.get_runtime_context().get_node_id()
+
+    # Schedule 1 task on each bundle
+    refs = []
+    for i in range(4):
+        refs.append(
+            get_node.options(
+                scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
+                    placement_group=pg, placement_group_bundle_index=i
+                )
+            ).remote()
+        )
+
+    nodes = ray.get(refs)
+
+    # Bundle 0 and 1 belong to group 0 (must be on the same node).
+    assert nodes[0] == nodes[1]
+    # Bundle 2 and 3 belong to group 1 (must be on the same node).
+    assert nodes[2] == nodes[3]
+    # Group 0 and Group 1 must be on different nodes due to SPREAD.
+    assert nodes[0] != nodes[2]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-sv", __file__]))
