@@ -12,7 +12,6 @@ from ray._private.accelerators.tpu import (
     get_chips_per_host,
     get_num_chips_from_topology,
     infer_tpu_pod_type_from_topology,
-    reserve_tpu_slice,
 )
 from ray._private.client_mode_hook import client_mode_wrap
 from ray.util.annotations import DeveloperAPI, PublicAPI
@@ -501,8 +500,6 @@ class SlicePlacementGroup:
         ),
         bundle_label_selector: Optional[List[Dict[str, str]]] = None,
     ):
-        self._head_pgs: List[PlacementGroup] = []
-        self._bundle_label_selector: List[Dict[str, str]] = []
         self._placement_group: Optional[PlacementGroup] = None
         self._user_bundle_label_selector = bundle_label_selector or []
 
@@ -564,7 +561,7 @@ class SlicePlacementGroup:
         name: str = "",
         lifetime: Optional[str] = None,
     ) -> PlacementGroup:
-        """Performs the two-step scheduling to reserve a TPU slice."""
+        """Performs topology-aware scheduling to allocate the TPU slice(s)."""
         if (
             self._user_bundle_label_selector
             and len(self._user_bundle_label_selector) != self._num_bundles
@@ -574,64 +571,33 @@ class SlicePlacementGroup:
                 f"match the number of bundles ({self._num_bundles})."
             )
 
-        self._bundle_label_selector = []
-        bundles = []
-        bundles_per_slice = self._num_bundles // self._num_slices
+        bundles = [self._bundle_resources.copy() for _ in range(self._num_bundles)]
 
-        # Construct accelerator format for reserve_tpu_slice. e.g. From "v6e" to "TPU-V6E", "v5p" to "TPU-V5P".
-        accelerator_type = "TPU-" + self.accelerator_version.upper()
+        topology_strategy = {
+            "ray.io/node-id": strategy,
+            "ray.io/tpu-slice-name": "STRICT_PACK",
+        }
 
-        try:
-            for slice_idx in range(self.num_slices):
-                reservation = reserve_tpu_slice(
-                    self._topology,
-                    accelerator_type,
-                    timeout_s=self._head_reservation_timeout_s,
-                )
-                if not reservation:
-                    raise RuntimeError(
-                        f"Failed to reserve TPU slice. Requested {self.num_slices} "
-                        f"slice(s) of topology '{self._topology}' with accelerator type "
-                        f"'{accelerator_type}'. Ensure that sufficient TPU resources are "
-                        "available in the cluster."
-                    )
+        if self.num_slices > 1:
+            bundles_per_slice = self._num_bundles // self._num_slices
+            nested_bundles = [
+                bundles[i * bundles_per_slice : (i + 1) * bundles_per_slice]
+                for i in range(self.num_slices)
+            ]
+        else:
+            nested_bundles = bundles
 
-                # Store the head placement group for clean-up when un-reserving the slice.
-                slice_name, head_pg = reservation
-                self._head_pgs.append(head_pg)
-
-                tpu_slice_name_label = {
-                    ray._raylet.RAY_NODE_TPU_SLICE_NAME_KEY: slice_name
-                }
-
-                for bundle_idx in range(bundles_per_slice):
-                    global_bundle_idx = slice_idx * bundles_per_slice + bundle_idx
-
-                    user_labels = (
-                        self._user_bundle_label_selector[global_bundle_idx]
-                        if global_bundle_idx < len(self._user_bundle_label_selector)
-                        else {}
-                    )
-                    # TPU slice name label takes precedence; user labels fill in the rest.
-                    merged_labels = {**user_labels, **tpu_slice_name_label}
-                    self._bundle_label_selector.append(merged_labels)
-
-                bundles += [
-                    self._bundle_resources.copy() for _ in range(bundles_per_slice)
-                ]
-
-            pg = placement_group(
-                bundles=bundles,
-                strategy=strategy,
-                name=name,
-                lifetime=lifetime,
-                bundle_label_selector=self._bundle_label_selector,
-            )
-
-            return pg
-        except Exception:
-            self.shutdown()
-            raise
+        return placement_group(
+            bundles=nested_bundles,
+            name=name,
+            lifetime=lifetime,
+            bundle_label_selector=(
+                self._user_bundle_label_selector
+                if self._user_bundle_label_selector
+                else None
+            ),
+            topology_strategy=topology_strategy,
+        )
 
     @property
     def placement_group(self) -> PlacementGroup:
@@ -670,47 +636,17 @@ class SlicePlacementGroup:
         return self._num_slices
 
     @property
-    def head_placement_groups(self) -> List[PlacementGroup]:
-        """The internal head PGs used to reserve the slices."""
-        return self._head_pgs
-
-    @property
     def bundle_label_selector(self) -> List[Dict[str, str]]:
         """The bundle label selector list for the worker PG."""
-        return self._bundle_label_selector
+        return self._user_bundle_label_selector
 
     @property
     def bundle_resources(self) -> Dict[str, float]:
         """The resources that are assigned to each bundle."""
         return self._bundle_resources
 
-    @DeveloperAPI(stability="alpha")
-    def release_head_pgs(self) -> None:
-        """Remove all internal head placement groups.
-
-        The head PGs exist only to atomically claim a TPU slice's label during
-        the race window between slice selection and worker-PG construction.
-        Once the worker PG's bundles are scheduled, the worker PG holds the TPU
-        resources on every host in the slice and the head PGs are redundant.
-
-        Callers should invoke this idempotent call after `self.placement_group.ready()`
-        resolves successfully.
-        """
-        head_pgs = getattr(self, "_head_pgs", [])
-        self._head_pgs = []
-        for head_pg in head_pgs:
-            try:
-                remove_placement_group(head_pg)
-            except Exception:
-                logger.exception(
-                    "Failed to remove TPU head placement group %s; the "
-                    "slice reservation marker may leak until the creator "
-                    "process exits.",
-                    getattr(head_pg, "id", head_pg),
-                )
-
     def shutdown(self):
-        """Remove the worker placement group and all internal head PGs.
+        """Remove the worker placement group.
 
         Idempotent. Safe to call on a partially-constructed instance.
         """
@@ -724,7 +660,6 @@ class SlicePlacementGroup:
                     "Failed to remove TPU worker placement group %s.",
                     getattr(worker_pg, "id", worker_pg),
                 )
-        self.release_head_pgs()
 
 
 @PublicAPI(stability="alpha")
@@ -917,9 +852,6 @@ def dispatch(
         if _owns_slice:
             slice_handle.shutdown()
         raise
-
-    if _owns_slice:
-        slice_handle.release_head_pgs()
 
     return [
         fn.options(
