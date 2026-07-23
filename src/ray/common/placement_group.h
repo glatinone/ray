@@ -93,7 +93,9 @@ class PlacementGroupSpecBuilder {
       const std::vector<std::unordered_map<std::string, std::string>>
           &bundle_label_selector = {},
       const std::unordered_map<std::string, rpc::PlacementStrategy> &topology_strategy =
-          {}) {
+          {},
+      const std::vector<std::vector<std::unordered_map<std::string, double>>>
+          &bundle_groups = {}) {
     message_->set_placement_group_id(placement_group_id.Binary());
     message_->set_name(name);
     message_->set_strategy(strategy);
@@ -137,6 +139,27 @@ class PlacementGroupSpecBuilder {
 
     message_->mutable_topology_strategy()->insert(topology_strategy.begin(),
                                                   topology_strategy.end());
+    int bundle_index = bundles.size();
+    for (size_t i = 0; i < bundle_groups.size(); i++) {
+      auto *group = message_->add_bundle_groups();
+      for (size_t j = 0; j < bundle_groups[i].size(); j++) {
+        auto resources = bundle_groups[i][j];
+        auto message_bundle = group->add_bundles();
+        auto mutable_bundle_id = message_bundle->mutable_bundle_id();
+        mutable_bundle_id->set_bundle_index(bundle_index++);
+        mutable_bundle_id->set_placement_group_id(placement_group_id.Binary());
+        auto mutable_unit_resources = message_bundle->mutable_unit_resources();
+        for (auto it = resources.begin(); it != resources.end();) {
+          auto current = it++;
+          // Remove a resource with value 0 because they are not allowed.
+          if (current->second == 0) {
+            resources.erase(current);
+          } else {
+            mutable_unit_resources->insert({current->first, current->second});
+          }
+        }
+      }
+    }
     return *this;
   }
 

@@ -688,6 +688,7 @@ message PlacementGroupTableData {
   // PlacementGroupSpec.topology_strategy. Empty if the PG does not use
   // topology-aware scheduling.
   map<string, PlacementStrategy> topology_strategy = 18;
+  repeated BundleGroup bundle_groups = 19;
 }
 
 message JobTableData {

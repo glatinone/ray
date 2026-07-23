@@ -536,25 +536,43 @@ SchedulingOptions GcsPlacementGroupScheduler::CreateSchedulingOptions(
   NodeID soft_target_node_id = placement_group.GetSoftTargetNodeID();
   PlacementGroupID placement_group_id = placement_group.GetPlacementGroupID();
 
+  SchedulingOptions options = SchedulingOptions::BundlePack(std::nullopt);
   switch (strategy) {
   case rpc::PlacementStrategy::PACK:
-    return SchedulingOptions::BundlePack(std::move(target_topology_assignment));
+    options = SchedulingOptions::BundlePack(std::move(target_topology_assignment));
+    break;
   case rpc::PlacementStrategy::SPREAD:
-    return SchedulingOptions::BundleSpread(std::move(target_topology_assignment));
+    options = SchedulingOptions::BundleSpread(std::move(target_topology_assignment));
+    break;
   case rpc::PlacementStrategy::STRICT_PACK:
-    return SchedulingOptions::BundleStrictPack(
+    options = SchedulingOptions::BundleStrictPack(
         soft_target_node_id.IsNil() ? scheduling::NodeID::Nil()
                                     : scheduling::NodeID(soft_target_node_id.Binary()),
         std::move(target_topology_assignment));
+    break;
   case rpc::PlacementStrategy::STRICT_SPREAD:
-    return SchedulingOptions::BundleStrictSpread(
-        CreateSchedulingContext(placement_group_id),
-        std::move(target_topology_assignment));
+    options =
+        SchedulingOptions::BundleStrictSpread(CreateSchedulingContext(placement_group_id),
+                                              std::move(target_topology_assignment));
+    break;
   default:
     RAY_LOG(FATAL) << "Unsupported scheduling type: "
                    << rpc::PlacementStrategy_Name(strategy);
   }
-  UNREACHABLE;
+
+  int current_idx = placement_group.GetPlacementGroupTableData().bundles_size();
+  for (const auto &group : placement_group.GetPlacementGroupTableData().bundle_groups()) {
+    std::vector<int> indices;
+    for (int i = 0; i < group.bundles_size(); i++) {
+      indices.push_back(current_idx++);
+    }
+    options.bundle_group_indices_.push_back(std::move(indices));
+  }
+  if (!options.bundle_group_indices_.empty()) {
+    options.outer_strategy_ = strategy;
+  }
+
+  return options;
 }
 
 absl::flat_hash_map<PlacementGroupID, std::vector<int64_t>>

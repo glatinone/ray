@@ -219,6 +219,11 @@ struct SchedulingOptions {
   int32_t schedule_top_k_absolute_;
   float scheduler_top_k_fraction_;
 
+  // The outer strategy if scheduling hierarchically.
+  rpc::PlacementStrategy outer_strategy_ = rpc::PlacementStrategy::PACK;
+  // Hierarchical bundle group indices.
+  std::vector<std::vector<int>> bundle_group_indices_;
+
  private:
   SchedulingOptions(
       SchedulingType type,

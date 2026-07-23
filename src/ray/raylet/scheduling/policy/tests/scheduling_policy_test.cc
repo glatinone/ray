@@ -849,6 +849,219 @@ TEST_F(SchedulingPolicyTest, GpuDomainSchedulingInfeasibleTest) {
   ASSERT_FALSE(result.selected_label_domain.has_value());
 }
 
+TEST_F(SchedulingPolicyTest, LabelDomainStrictPackBundleLabelSelectorTest) {
+  const std::string kDomainLabelKey = "ray.io/tpu-slice-name";
+  absl::flat_hash_map<std::string, std::string> v6e_labels = {
+      {kDomainLabelKey, "slice-1"}, {"ray.io/tpu-pod-type", "v6e-16"}};
+  absl::flat_hash_map<std::string, std::string> v5p_labels = {
+      {kDomainLabelKey, "slice-1"}, {"ray.io/tpu-pod-type", "v5p-16"}};
+
+  for (int i = 0; i < 4; i++) {
+    scheduling::NodeID node_id = scheduling::NodeID(i);
+    NodeResources resources = CreateNodeResources(1, 1, 0, 0, 0, 0);
+    if (i < 2) {
+      resources.labels = v6e_labels;
+    } else {
+      resources.labels = v5p_labels;
+    }
+    nodes.emplace(node_id, resources);
+  }
+
+  std::unique_ptr<ClusterResourceManager> cluster_resource_manager =
+      MockClusterResourceManager(nodes);
+
+  ResourceRequest bundle_req = ResourceMapToResourceRequest(
+      absl::flat_hash_map<std::string, double>{{"CPU", 1}}, false);
+  LabelSelector selector(
+      std::map<std::string, std::string>{{"ray.io/tpu-pod-type", "v6e-16"}});
+  bundle_req.SetLabelSelector(selector);
+
+  std::vector<const ResourceRequest *> req_list(2, &bundle_req);
+
+  LabelDomainStrictPackSchedulingPolicy label_domain_policy(*cluster_resource_manager);
+  SchedulingOptions options = SchedulingOptions::BundleStrictSpread(
+      nullptr, std::make_pair(kDomainLabelKey, std::optional<std::string>(std::nullopt)));
+
+  BundleStrictSpreadSchedulingPolicy node_policy(*cluster_resource_manager);
+  NodeScheduleFn node_schedule_fn = [&node_policy](
+                                        const std::vector<const ResourceRequest *> &reqs,
+                                        SchedulingOptions opts,
+                                        absl::flat_hash_set<scheduling::NodeID> nodes) {
+    return node_policy.Schedule(reqs, opts, std::move(nodes));
+  };
+
+  SchedulingResult result = label_domain_policy.Schedule(
+      req_list, options, GetCandidateNodes(*cluster_resource_manager), node_schedule_fn);
+
+  ASSERT_TRUE(result.status.IsSuccess());
+  ASSERT_TRUE(result.selected_label_domain.has_value());
+  ASSERT_EQ(result.selected_label_domain->first, kDomainLabelKey);
+  ASSERT_EQ(result.selected_label_domain->second, "slice-1");
+  ASSERT_EQ(result.selected_nodes.size(), 2);
+
+  for (const scheduling::NodeID &node_id : result.selected_nodes) {
+    ASSERT_TRUE(node_id.ToInt() == 0 || node_id.ToInt() == 1);
+  }
+}
+
+TEST_F(SchedulingPolicyTest, HierarchicalBundleSchedulingPackTest) {
+  for (int i = 0; i < 4; i++) {
+    scheduling::NodeID node_id = scheduling::NodeID(i);
+    // Node with 1 CPU.
+    NodeResources resources = CreateNodeResources(1, 1, 0, 0, 0, 0);
+    nodes.emplace(node_id, resources);
+  }
+
+  std::unique_ptr<ClusterResourceManager> cluster_resource_manager =
+      MockClusterResourceManager(nodes);
+
+  ResourceRequest bundle_req = ResourceMapToResourceRequest(
+      absl::flat_hash_map<std::string, double>{{"CPU", 1}}, false);
+  // 4 bundles total.
+  std::vector<const ResourceRequest *> req_list(4, &bundle_req);
+
+  HierarchicalBundleSchedulingPolicy policy(*cluster_resource_manager);
+
+  SchedulingOptions options = SchedulingOptions::BundlePack();
+  // Group 0 has indices 0, 1
+  // Group 1 has indices 2, 3
+  options.bundle_group_indices_ = {{0, 1}, {2, 3}};
+
+  // Track how many times the inner scheduler is called.
+  int inner_schedule_calls = 0;
+
+  NodeScheduleFn node_schedule_fn = [&inner_schedule_calls](
+                                        const std::vector<const ResourceRequest *> &reqs,
+                                        SchedulingOptions opts,
+                                        absl::flat_hash_set<scheduling::NodeID> nodes) {
+    inner_schedule_calls++;
+    // Verify each sub-request has 2 bundles
+    EXPECT_EQ(reqs.size(), 2);
+
+    SchedulingResult result;
+    result.status.code = SchedulingResultStatus::SchedulingResultStatusCode::SUCCESS;
+    // Assign bundles to nodes (in reality the pack policy would do this).
+    result.selected_nodes.push_back(scheduling::NodeID(inner_schedule_calls));
+    result.selected_nodes.push_back(scheduling::NodeID(inner_schedule_calls));
+    return result;
+  };
+
+  SchedulingResult result = policy.Schedule(
+      req_list, options, GetCandidateNodes(*cluster_resource_manager), node_schedule_fn);
+
+  ASSERT_TRUE(result.status.IsSuccess());
+  ASSERT_EQ(inner_schedule_calls, 2);
+  ASSERT_EQ(result.selected_nodes.size(), 4);
+
+  // The first group should be assigned to NodeID(1) by our mock.
+  ASSERT_EQ(result.selected_nodes[0].ToInt(), 1);
+  ASSERT_EQ(result.selected_nodes[1].ToInt(), 1);
+  // The second group should be assigned to NodeID(2) by our mock.
+  ASSERT_EQ(result.selected_nodes[2].ToInt(), 2);
+  ASSERT_EQ(result.selected_nodes[3].ToInt(), 2);
+}
+
+TEST_F(SchedulingPolicyTest, HierarchicalBundleSchedulingInfeasibleTest) {
+  for (int i = 0; i < 4; i++) {
+    scheduling::NodeID node_id = scheduling::NodeID(i);
+    // Node with 1 CPU.
+    NodeResources resources = CreateNodeResources(1, 1, 0, 0, 0, 0);
+    nodes.emplace(node_id, resources);
+  }
+
+  std::unique_ptr<ClusterResourceManager> cluster_resource_manager =
+      MockClusterResourceManager(nodes);
+
+  ResourceRequest bundle_req = ResourceMapToResourceRequest(
+      absl::flat_hash_map<std::string, double>{{"CPU", 1}}, false);
+  // 4 bundles total.
+  std::vector<const ResourceRequest *> req_list(4, &bundle_req);
+
+  HierarchicalBundleSchedulingPolicy policy(*cluster_resource_manager);
+
+  SchedulingOptions options = SchedulingOptions::BundlePack();
+  // Group 0 has indices 0, 1
+  // Group 1 has indices 2, 3
+  options.bundle_group_indices_ = {{0, 1}, {2, 3}};
+
+  // Track how many times the inner scheduler is called.
+  int inner_schedule_calls = 0;
+
+  NodeScheduleFn node_schedule_fn = [&inner_schedule_calls](
+                                        const std::vector<const ResourceRequest *> &reqs,
+                                        SchedulingOptions opts,
+                                        absl::flat_hash_set<scheduling::NodeID> nodes) {
+    inner_schedule_calls++;
+
+    SchedulingResult result;
+    if (inner_schedule_calls == 2) {
+      result.status.code = SchedulingResultStatus::SchedulingResultStatusCode::INFEASIBLE;
+      return result;
+    }
+
+    result.status.code = SchedulingResultStatus::SchedulingResultStatusCode::SUCCESS;
+    result.selected_nodes.push_back(scheduling::NodeID(inner_schedule_calls));
+    result.selected_nodes.push_back(scheduling::NodeID(inner_schedule_calls));
+    return result;
+  };
+
+  SchedulingResult result = policy.Schedule(
+      req_list, options, GetCandidateNodes(*cluster_resource_manager), node_schedule_fn);
+
+  ASSERT_TRUE(result.status.IsInfeasible());
+  ASSERT_EQ(inner_schedule_calls, 2);
+  ASSERT_EQ(result.selected_nodes.size(), 0);
+}
+
+TEST_F(SchedulingPolicyTest, HierarchicalBundleSchedulingFailedTest) {
+  for (int i = 0; i < 4; i++) {
+    scheduling::NodeID node_id = scheduling::NodeID(i);
+    NodeResources resources = CreateNodeResources(1, 1, 0, 0, 0, 0);
+    nodes.emplace(node_id, resources);
+  }
+
+  std::unique_ptr<ClusterResourceManager> cluster_resource_manager =
+      MockClusterResourceManager(nodes);
+
+  ResourceRequest bundle_req = ResourceMapToResourceRequest(
+      absl::flat_hash_map<std::string, double>{{"CPU", 1}}, false);
+  std::vector<const ResourceRequest *> req_list(4, &bundle_req);
+
+  HierarchicalBundleSchedulingPolicy policy(*cluster_resource_manager);
+
+  SchedulingOptions options = SchedulingOptions::BundlePack();
+  options.bundle_group_indices_ = {{0, 1}, {2, 3}};
+
+  int inner_schedule_calls = 0;
+
+  NodeScheduleFn node_schedule_fn = [&inner_schedule_calls](
+                                        const std::vector<const ResourceRequest *> &reqs,
+                                        SchedulingOptions opts,
+                                        absl::flat_hash_set<scheduling::NodeID> nodes) {
+    inner_schedule_calls++;
+
+    SchedulingResult result;
+    if (inner_schedule_calls == 1) {
+      // First one fails with retryable failure.
+      result.status.code = SchedulingResultStatus::SchedulingResultStatusCode::FAILED;
+      return result;
+    }
+
+    result.status.code = SchedulingResultStatus::SchedulingResultStatusCode::SUCCESS;
+    result.selected_nodes.push_back(scheduling::NodeID(inner_schedule_calls));
+    result.selected_nodes.push_back(scheduling::NodeID(inner_schedule_calls));
+    return result;
+  };
+
+  SchedulingResult result = policy.Schedule(
+      req_list, options, GetCandidateNodes(*cluster_resource_manager), node_schedule_fn);
+
+  ASSERT_TRUE(result.status.IsFailed());
+  // The outer policy should return early after the first failure.
+  ASSERT_EQ(inner_schedule_calls, 1);
+  ASSERT_EQ(result.selected_nodes.size(), 0);
+}
+
 }  // namespace raylet
 
 }  // namespace ray

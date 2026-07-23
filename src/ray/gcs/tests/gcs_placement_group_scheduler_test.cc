@@ -1526,5 +1526,56 @@ TEST_F(GcsPlacementGroupSchedulerTest,
   WaitPlacementGroupPendingDone(2, GcsPlacementGroupStatus::SUCCESS);
 }
 
+TEST_F(GcsPlacementGroupSchedulerTest, TestHierarchicalBundleScheduling) {
+  auto node0 = GenNodeInfo(0);
+  AddNode(node0, 10);
+  auto node1 = GenNodeInfo(1);
+  AddNode(node1, 10);
+
+  NodeID node_id0 = NodeID::FromBinary(node0->node_id());
+  NodeID node_id1 = NodeID::FromBinary(node1->node_id());
+
+  cluster_resource_scheduler_->GetClusterResourceManager().SetNodeLabels(
+      scheduling::NodeID(node_id0.Binary()), {{"ray.io/gpu-domain", "domain-1"}});
+  cluster_resource_scheduler_->GetClusterResourceManager().SetNodeLabels(
+      scheduling::NodeID(node_id1.Binary()), {{"ray.io/gpu-domain", "domain-2"}});
+
+  auto request =
+      GenCreatePlacementGroupRequest("", rpc::PlacementStrategy::STRICT_SPREAD, 0, 1.0);
+
+  auto *spec = request.mutable_placement_group_spec();
+  spec->clear_bundles();
+
+  // Outer Strategy: STRICT_SPREAD
+  (*spec->mutable_topology_strategy())["ray.io/gpu-domain"] =
+      rpc::PlacementStrategy::STRICT_SPREAD;
+
+  // Add 2 BundleGroups, each with 1 Bundle
+  auto *group1 = spec->add_bundle_groups();
+  auto *group1_bundle = group1->add_bundles();
+  group1_bundle->mutable_unit_resources()->insert({"CPU", 1.0});
+  auto pg_id_str = spec->placement_group_id();
+  group1_bundle->mutable_bundle_id()->mutable_placement_group_id()->assign(pg_id_str);
+  group1_bundle->mutable_bundle_id()->set_bundle_index(0);
+
+  auto *group2 = spec->add_bundle_groups();
+  auto *group2_bundle = group2->add_bundles();
+  group2_bundle->mutable_unit_resources()->insert({"CPU", 1.0});
+  group2_bundle->mutable_bundle_id()->mutable_placement_group_id()->assign(pg_id_str);
+  group2_bundle->mutable_bundle_id()->set_bundle_index(1);
+
+  auto pg = std::make_shared<GcsPlacementGroup>(request, "", counter_, clock_);
+
+  ScheduleUnplacedBundles(pg);
+
+  ASSERT_TRUE(raylet_clients_[0]->GrantPrepareBundleResources());
+  ASSERT_TRUE(raylet_clients_[1]->GrantPrepareBundleResources());
+  WaitPendingDone(raylet_clients_[0]->commit_callbacks, 1);
+  WaitPendingDone(raylet_clients_[1]->commit_callbacks, 1);
+  ASSERT_TRUE(raylet_clients_[0]->GrantCommitBundleResources());
+  ASSERT_TRUE(raylet_clients_[1]->GrantCommitBundleResources());
+  WaitPlacementGroupPendingDone(1, GcsPlacementGroupStatus::SUCCESS);
+}
+
 }  // namespace gcs
 }  // namespace ray

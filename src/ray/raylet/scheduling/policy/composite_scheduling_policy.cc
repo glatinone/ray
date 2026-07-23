@@ -47,6 +47,22 @@ SchedulingResult CompositeBundleSchedulingPolicy::Schedule(
     const std::vector<const ResourceRequest *> &resource_request_list,
     SchedulingOptions options,
     absl::flat_hash_set<scheduling::NodeID> candidate_nodes) {
+  if (!options.bundle_group_indices_.empty()) {
+    NodeScheduleFn node_schedule_fn =
+        [this](const std::vector<const ResourceRequest *> &reqs,
+               SchedulingOptions opts,
+               absl::flat_hash_set<scheduling::NodeID> nodes) {
+          // Default to packing bundles within a group as tightly as possible
+          // since a group represents a single physical unit (like a TPU slice).
+          opts.scheduling_type_ = SchedulingType::BUNDLE_PACK;
+          return this->Schedule(reqs, std::move(opts), std::move(nodes));
+        };
+    return hierarchical_bundle_policy_.Schedule(resource_request_list,
+                                                std::move(options),
+                                                std::move(candidate_nodes),
+                                                node_schedule_fn);
+  }
+
   if (options.label_domain_scheduling_strategy_ != LabelDomainSchedulingStrategy::NONE) {
     NodeScheduleFn node_schedule_fn =
         [this](const std::vector<const ResourceRequest *> &reqs,

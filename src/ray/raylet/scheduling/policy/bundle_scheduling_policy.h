@@ -113,5 +113,22 @@ class BundleStrictSpreadSchedulingPolicy : public BundleSchedulingPolicy {
       absl::flat_hash_set<scheduling::NodeID> &candidate_nodes,
       const SchedulingContext *context);
 };
+
+class HierarchicalBundleSchedulingPolicy {
+ public:
+  explicit HierarchicalBundleSchedulingPolicy(
+      ClusterResourceManager &cluster_resource_manager)
+      : cluster_resource_manager_(cluster_resource_manager) {}
+
+  SchedulingResult Schedule(
+      const std::vector<const ResourceRequest *> &resource_request_list,
+      SchedulingOptions options,
+      absl::flat_hash_set<scheduling::NodeID> candidate_nodes,
+      NodeScheduleFn node_schedule_fn);
+
+ private:
+  ClusterResourceManager &cluster_resource_manager_;
+};
+
 }  // namespace raylet_scheduling_policy
 }  // namespace ray

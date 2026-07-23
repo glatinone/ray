@@ -695,6 +695,10 @@ message Bundle {
   map<string, string> label_selector = 4;
 }
 
+message BundleGroup {
+  repeated Bundle bundles = 1;
+}
+
 message PlacementGroupSpec {
   // ID of the PlacementGroup.
   bytes placement_group_id = 1;
@@ -722,6 +726,7 @@ message PlacementGroupSpec {
   // Topology strategy. Maps non-node topology label keys (e.g.
   // "ray.io/gpu-domain") to the placement strategy applied at that label.
   map<string, PlacementStrategy> topology_strategy = 12;
+  repeated BundleGroup bundle_groups = 13;
 }
 
 message ObjectReference {

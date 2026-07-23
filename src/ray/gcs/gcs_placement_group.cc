@@ -64,6 +64,13 @@ std::vector<std::shared_ptr<const BundleSpecification>> &GcsPlacementGroup::GetB
     for (const auto &bundle : bundles) {
       cached_bundle_specs_.push_back(std::make_shared<const BundleSpecification>(bundle));
     }
+    const auto &bundle_groups = placement_group_table_data_.bundle_groups();
+    for (const auto &group : bundle_groups) {
+      for (const auto &bundle : group.bundles()) {
+        cached_bundle_specs_.push_back(
+            std::make_shared<const BundleSpecification>(bundle));
+      }
+    }
   }
   return cached_bundle_specs_;
 }
@@ -108,7 +115,7 @@ std::string GcsPlacementGroup::DebugString() const {
 rpc::Bundle *GcsPlacementGroup::GetMutableBundle(int bundle_index) {
   // Invalidate the cache.
   cached_bundle_specs_.clear();
-  return placement_group_table_data_.mutable_bundles(bundle_index);
+  return bundle_index_to_mutable_bundle_[bundle_index];
 }
 
 const ActorID GcsPlacementGroup::GetCreatorActorId() const {

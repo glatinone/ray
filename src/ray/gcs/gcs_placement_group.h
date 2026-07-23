@@ -48,6 +48,7 @@ class GcsPlacementGroup {
         counter_(counter),
         clock_(clock) {
     SetupStates();
+    PrecomputeBundleIndexMapping();
   }
 
   /// Create a GcsPlacementGroup by CreatePlacementGroupRequest.
@@ -67,6 +68,8 @@ class GcsPlacementGroup {
     placement_group_table_data_.set_state(rpc::PlacementGroupTableData::PENDING);
     placement_group_table_data_.mutable_bundles()->CopyFrom(
         placement_group_spec.bundles());
+    placement_group_table_data_.mutable_bundle_groups()->CopyFrom(
+        placement_group_spec.bundle_groups());
     placement_group_table_data_.set_strategy(placement_group_spec.strategy());
     placement_group_table_data_.set_creator_job_id(placement_group_spec.creator_job_id());
     placement_group_table_data_.set_creator_actor_id(
@@ -84,6 +87,7 @@ class GcsPlacementGroup {
     *placement_group_table_data_.mutable_topology_strategy() =
         placement_group_spec.topology_strategy();
     SetupStates();
+    PrecomputeBundleIndexMapping();
   }
 
   ~GcsPlacementGroup() {
@@ -175,7 +179,6 @@ class GcsPlacementGroup {
   /// Record that `label_value` has been selected for `label_key`.
   void SetTopologyAssignment(const std::string &label_key,
                              const std::string &label_value);
-
   /// Clear all topology assignments (used when every bundle of a topology-aware
   /// PG becomes unplaced, so a fresh selection can be made).
   void ClearTopologyAssignments();
@@ -183,6 +186,23 @@ class GcsPlacementGroup {
  private:
   // XXX.
   FRIEND_TEST(GcsPlacementGroupManagerTest, TestPlacementGroupBundleCache);
+
+  void PrecomputeBundleIndexMapping() {
+    bundle_index_to_mutable_bundle_.clear();
+    for (int i = 0; i < placement_group_table_data_.bundles_size(); i++) {
+      bundle_index_to_mutable_bundle_.push_back(
+          placement_group_table_data_.mutable_bundles(i));
+    }
+    for (int i = 0; i < placement_group_table_data_.bundle_groups_size(); i++) {
+      auto *bundle_group = placement_group_table_data_.mutable_bundle_groups(i);
+      for (int j = 0; j < bundle_group->bundles_size(); j++) {
+        bundle_index_to_mutable_bundle_.push_back(bundle_group->mutable_bundles(j));
+      }
+    }
+  }
+
+  /// Reference to the mutable bundles by flattened index.
+  std::vector<rpc::Bundle *> bundle_index_to_mutable_bundle_;
 
   /// Setup states other than placement_group_table_data_.
   void SetupStates() {
